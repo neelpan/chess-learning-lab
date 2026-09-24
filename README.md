@@ -1,36 +1,32 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Chess Learning Lab
 
-## Getting Started
+A small prototype of a tighter chess learning loop: **play → recognise the concept → understand the mistake → reinforce.**
 
-First, run the development server:
+1. **Play** – a predefined opening position. Make a move; the lab recognises the opening/concept you've reached and explains why it matters.
+2. **Train** – a teaching position with a tempting mistake. Stockfish judges your move objectively; if it's inferior you see what you played, the better move, why it's weaker, and the principle behind it. Retry freely.
+3. **Recap** – concepts encountered, the mistake worth revisiting, the principle to remember, one takeaway.
+
+## Run it
 
 ```bash
+npm install
+cp .env.example .env.local   # add your MISTRAL_API_KEY
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The app works without an API key — teaching text falls back to deterministic copy.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## How it's built
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- **Rules & state:** `chess.js`. **Board:** `react-chessboard`.
+- **Evaluation:** Stockfish 19 (WASM, lite single-threaded) in a Web Worker — [src/lib/engine.ts](src/lib/engine.ts). The engine binary is copied from `node_modules` to `public/engine/` by [scripts/copy-engine.mjs](scripts/copy-engine.mjs) before `dev`/`build`.
+- **Language:** Mistral `ministral-3b-2512` writes the explanations only. It never picks or evaluates moves; it is handed facts computed by chess.js + Stockfish. The provider sits behind the `LLMProvider` interface in [src/lib/llm/](src/lib/llm/), called from a server route ([src/app/api/explain/route.ts](src/app/api/explain/route.ts)) so the key never reaches the browser.
+- **Lesson content:** [src/content/curriculum.ts](src/content/curriculum.ts).
 
-## Learn More
+## Environment variables
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+| Variable | Required | Default |
+| --- | --- | --- |
+| `MISTRAL_API_KEY` | for LLM explanations | – |
+| `MISTRAL_MODEL` | no | `ministral-3b-2512` |
+| `LLM_PROVIDER` | no | `mistral` |
