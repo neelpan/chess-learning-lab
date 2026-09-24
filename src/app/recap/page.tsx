@@ -7,7 +7,7 @@ import { CONCEPTS, TRAINING } from "@/content/curriculum";
 import { recapFallback, type RecapFacts } from "@/lib/teaching";
 
 export default function RecapPage() {
-  const { attempts, concepts, solved, usedReveal, resetAll } = useSession();
+  const { attempts, concepts, solved, usedReveal, trap, resetAll } = useSession();
   const completed = solved;
 
   const mistake = attempts.find((a) => a.verdict === "inferior") ?? null;
@@ -122,8 +122,9 @@ export default function RecapPage() {
             <Panel tone="gold">
               <h2 className="font-display text-xl font-semibold">A trap to keep in mind</h2>
               <p className="mt-2 text-sm leading-relaxed">
-                No mistakes this time. But most players fall for{" "}
-                <strong>{TRAINING.trap.move}</strong> here — {TRAINING.trap.body}
+                No mistakes this time. But many players are tempted by{" "}
+                <strong>{trap?.san ?? TRAINING.temptingMove}</strong> here.{" "}
+                {trap?.text ?? "Stockfish prefers a different move."}
               </p>
             </Panel>
           )}

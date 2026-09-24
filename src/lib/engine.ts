@@ -1,22 +1,24 @@
 // Deterministic chess evaluation: Stockfish (WASM, lite single-threaded) in a Web Worker.
 // The LLM is never asked to evaluate positions — everything numeric comes from here.
 
-export type Analysis = {
-  /** Centipawns from the side-to-move's perspective (mate scores are clamped). */
-  cp: number;
-  /** Moves to mate (positive = side to move mates), or null. */
-  mate: number | null;
-  bestMove: string;
-  /** Principal variation in UCI notation. */
-  pv: string[];
+import { SearchCollector, searchCommands, type Analysis } from "./uci";
+
+export type { Analysis, EngineLine } from "./uci";
+
+export type AnalyseOptions = {
+  depth?: number;
+  /** Number of principal variations to return (default 1). */
+  multiPv?: number;
 };
 
-type AnalyseOptions = { depth?: number };
+/** Anything that can analyse a position; implemented by the browser worker and the Node test engine. */
+export interface AnalysisEngine {
+  analyse(fen: string, options?: AnalyseOptions): Promise<Analysis>;
+}
 
 const ENGINE_URL = "/engine/stockfish-19-lite-single.js";
-const MATE_CP = 1000;
 
-class Engine {
+class Engine implements AnalysisEngine {
   private worker: Worker;
   private ready: Promise<void>;
   private queue: Promise<unknown> = Promise.resolve();
@@ -48,42 +50,26 @@ class Engine {
   }
 
   /** Analyses run one at a time; the engine has a single search state. */
-  analyse(fen: string, { depth = 14 }: AnalyseOptions = {}): Promise<Analysis> {
-    const run = () => this.search(fen, depth);
+  analyse(fen: string, options: AnalyseOptions = {}): Promise<Analysis> {
+    const run = () => this.search(fen, options.depth ?? 14, options.multiPv ?? 1);
     const result = this.queue.then(run, run);
     this.queue = result.catch(() => undefined);
     return result;
   }
 
-  private async search(fen: string, depth: number): Promise<Analysis> {
+  private async search(fen: string, depth: number, multiPv: number): Promise<Analysis> {
     await this.ready;
     return new Promise((resolve, reject) => {
-      let cp = 0;
-      let mate: number | null = null;
-      let pv: string[] = [];
-
+      const collector = new SearchCollector();
       const onError = () => {
         cleanup();
         reject(new Error("Chess engine crashed"));
       };
       const onMessage = (e: MessageEvent) => {
-        const line = String(e.data);
-        if (line.startsWith("info") && line.includes(" score ") && line.includes(" pv ")) {
-          const score = line.match(/score (cp|mate) (-?\d+)/);
-          if (score) {
-            if (score[1] === "cp") {
-              cp = Number(score[2]);
-              mate = null;
-            } else {
-              mate = Number(score[2]);
-              cp = Math.sign(mate) * MATE_CP;
-            }
-          }
-          pv = line.split(" pv ")[1].trim().split(/\s+/);
-        } else if (line.startsWith("bestmove")) {
+        const done = collector.feed(String(e.data));
+        if (done) {
           cleanup();
-          const bestMove = line.split(/\s+/)[1];
-          resolve({ cp: clamp(cp), mate, bestMove, pv: pv.length ? pv : [bestMove] });
+          resolve(done);
         }
       };
       const cleanup = () => {
@@ -93,16 +79,9 @@ class Engine {
 
       this.worker.addEventListener("message", onMessage);
       this.worker.addEventListener("error", onError);
-      // Clear the hash so identical positions always give identical evaluations.
-      this.worker.postMessage("ucinewgame");
-      this.worker.postMessage(`position fen ${fen}`);
-      this.worker.postMessage(`go depth ${depth}`);
+      for (const command of searchCommands(fen, depth, multiPv)) this.worker.postMessage(command);
     });
   }
-}
-
-function clamp(cp: number) {
-  return Math.max(-MATE_CP, Math.min(MATE_CP, cp));
 }
 
 let instance: Engine | null = null;

@@ -6,9 +6,14 @@ import { ChessBoard } from "@/components/ChessBoard";
 import { useSession } from "@/components/SessionProvider";
 import { Badge, Button, Eyebrow, LinkButton, Panel, PrincipleBox } from "@/components/ui";
 import { formatEval, lineToSan, parseUci, tryMove, uciToSan, type Uci } from "@/lib/chess-utils";
+import { findTacticalConsequence } from "@/lib/tactics/analyze";
+import { describeThreats, motifLabel, tacticExplanation } from "@/lib/tactics/describe";
+import type { TacticalFacts } from "@/lib/tactics/types";
 import { getEngine, type Analysis } from "@/lib/engine";
-import { mistakeFallback, type MistakeFacts } from "@/lib/teaching";
-import { TRAINING } from "@/content/curriculum";
+import { buildMistakeFacts } from "@/lib/mistake";
+import { mistakeFallback } from "@/lib/teaching";
+import { TRAINING, principleAppliesTo } from "@/content/curriculum";
+import { Chess } from "chess.js";
 
 type Phase = "loading" | "ready" | "checking" | "wrong" | "correct";
 
@@ -20,10 +25,19 @@ type Result = {
   verdict: "best" | "good" | "inferior";
   refutation: { san: string; from: string; to: string } | null;
   explanation: string | null; // null while the coach is still writing
+  /** Set when Stockfish + chess.js verified a concrete tactic behind the mistake. */
+  tactic: TacticalFacts | null;
+  /** For good moves: what the move does and where the engine expects it to lead. */
+  insight: string | null;
 };
 
 const RED = "rgba(169, 63, 44, 0.85)";
 const GREEN = "rgba(44, 122, 75, 0.9)";
+
+function parseUciFromSan(san: string): Uci {
+  const m = new Chess(TRAINING.fen).move(san);
+  return { from: m.from, to: m.to, promotion: m.promotion };
+}
 
 export default function TrainPage() {
   const session = useSession();
@@ -88,9 +102,11 @@ export default function TrainPage() {
     let playedCp = base.cp;
     let playedMate = base.mate;
     let replyPv: string[] = [];
+    let after: Analysis | null = null;
     if (!isBest) {
       try {
-        const after = await getEngine().analyse(afterFen);
+        // Three lines: the top reply is the refutation; the others are candidates for tactic detection.
+        after = await getEngine().analyse(afterFen, { multiPv: 3 });
         // The engine scores from the side to move (the opponent), so flip to the learner's view.
         playedCp = -after.cp;
         playedMate = after.mate === null ? null : -after.mate;
@@ -127,27 +143,53 @@ export default function TrainPage() {
     const summary = { playedSan, bestSan: best, playedEval, bestEval, verdict };
 
     if (verdict !== "inferior") {
+      // What the move does, derived from the position plus Stockfish's expected continuation.
+      const line = isBest
+        ? lineToSan(TRAINING.fen, base.pv, 5)
+        : [playedSan, ...lineToSan(afterFen, replyPv, 4)];
+      const insight = [
+        describeThreats(TRAINING.fen, playedUci),
+        line.length > 1 ? `Stockfish expects ${line.join(" ")}.` : null,
+      ]
+        .filter(Boolean)
+        .join(" ");
       session.markSolved();
-      setResult({ ...summary, refutation: null, explanation: null });
+      setResult({ ...summary, refutation: null, explanation: null, tactic: null, insight });
       setPhase("correct");
+      void explainTemptingMove(base, best);
       return;
     }
 
-    setResult({ ...summary, refutation: reply, explanation: null });
+    setResult({ ...summary, refutation: reply, explanation: null, tactic: null, insight: null });
     setPhase("wrong");
 
+    // Forward-looking tactical analysis: is there a concrete, engine-verified punishment?
+    let tactic: TacticalFacts | null = null;
+    try {
+      tactic = await findTacticalConsequence({
+        engine: getEngine(),
+        beforeFen: TRAINING.fen,
+        learnerMove: move,
+        baseline: base,
+        after: after ?? undefined,
+      });
+    } catch {
+      /* no tactic claimed; the deterministic explanation still applies */
+    }
+    if (tactic) setResult((r) => (r && r.playedSan === playedSan ? { ...r, tactic } : r));
+
     // Natural-language explanation: LLM when configured, deterministic copy otherwise.
-    const facts: MistakeFacts = {
-      theme: TRAINING.theme,
-      principle: TRAINING.principle.body,
-      playerColor: "Black",
+    const facts = buildMistakeFacts({
+      beforeFen: TRAINING.fen,
+      afterFen,
       playedSan,
       bestSan: best,
       playedEval,
       bestEval,
-      refutationLine: lineToSan(afterFen, replyPv, 4),
-      bestLine: lineToSan(TRAINING.fen, base.pv, 5),
-    };
+      replyPv,
+      bestPv: base.pv,
+      tactic,
+    });
     let text = mistakeFallback(facts);
     try {
       const res = await fetch("/api/explain", {
@@ -163,6 +205,31 @@ export default function TrainPage() {
     setResult((r) => (r && r.playedSan === playedSan ? { ...r, explanation: text } : r));
   }
 
+  /** For the recap: explain the classic mistake here with the same pipeline (no hand-written text). */
+  async function explainTemptingMove(base: Analysis, best: string) {
+    try {
+      const tempting = tryMove(TRAINING.fen, { ...parseUciFromSan(TRAINING.temptingMove) });
+      if (!tempting) return;
+      const engine = getEngine();
+      const after = await engine.analyse(tempting.fen, { multiPv: 3 });
+      const tactic = await findTacticalConsequence({
+        engine,
+        beforeFen: TRAINING.fen,
+        learnerMove: tempting.move,
+        baseline: base,
+        after,
+      });
+      session.setTrap({
+        san: tempting.move.san,
+        text: tactic
+          ? tacticExplanation(tactic)
+          : `It looks natural, but Stockfish prefers ${best}.`,
+      });
+    } catch {
+      /* the recap falls back to a generic line */
+    }
+  }
+
   function retry(revealBest: boolean) {
     setFen(TRAINING.fen);
     setLastMove(null);
@@ -173,13 +240,13 @@ export default function TrainPage() {
   }
 
   const arrows: Arrow[] = [];
-  if (phase === "wrong" && result?.refutation) {
-    arrows.push({
-      startSquare: result.refutation.from,
-      endSquare: result.refutation.to,
-      color: RED,
-    });
+  if (phase === "wrong" && result) {
+    // Prefer the verified tactical move; otherwise the engine's top reply.
+    const punish = result.tactic ? parseUci(result.tactic.opponentMoveUci) : result.refutation;
+    if (punish) arrows.push({ startSquare: punish.from, endSquare: punish.to, color: RED });
   }
+  const tacticSquares =
+    phase === "wrong" && result?.tactic ? result.tactic.targets.map((t) => t.square) : [];
   if (phase === "ready" && showBest && baseline) {
     const b = parseUci(baseline.bestMove);
     arrows.push({ startSquare: b.from, endSquare: b.to, color: GREEN });
@@ -194,7 +261,7 @@ export default function TrainPage() {
           movableColor={phase === "ready" ? "b" : null}
           onMove={handleMove}
           lastMove={lastMove}
-          focusSquares={phase === "ready" ? TRAINING.focusSquares : []}
+          focusSquares={phase === "ready" ? TRAINING.focusSquares : tacticSquares}
           arrows={arrows}
         />
         <p className="mt-3 font-mono text-[13px] text-muted">{TRAINING.setup}</p>
@@ -255,6 +322,7 @@ export default function TrainPage() {
           <Panel tone="danger">
             <div className="flex items-center gap-2">
               <Badge tone="danger">Inferior move</Badge>
+              {result.tactic && <Badge tone="gold">{motifLabel(result.tactic)}</Badge>}
               <span className="text-xs text-muted">
                 Not the end of the world — let&apos;s see why.
               </span>
@@ -292,17 +360,25 @@ export default function TrainPage() {
               ) : (
                 <p className="mt-2 leading-relaxed">{result.explanation}</p>
               )}
-              {result.refutation && (
-                <p className="mt-2 text-sm text-muted">
-                  Engine&apos;s punishing reply:{" "}
-                  <strong className="text-ink">{result.refutation.san}</strong> (red arrow).
+              {result.tactic ? (
+                <p className="mt-2 text-xs text-muted">
+                  Tactic: {motifLabel(result.tactic)}, confirmed by Stockfish. The red arrow shows{" "}
+                  {result.tactic.opponentMove}; outlined squares are the pieces involved.
                 </p>
+              ) : (
+                result.refutation && (
+                  <p className="mt-2 text-xs text-muted">
+                    The red arrow shows Stockfish&apos;s strongest reply, {result.refutation.san}.
+                  </p>
+                )
               )}
             </div>
 
-            <div className="mt-4">
-              <PrincipleBox title={TRAINING.principle.title} body={TRAINING.principle.body} />
-            </div>
+            {principleAppliesTo(result.tactic) && (
+              <div className="mt-4">
+                <PrincipleBox title={TRAINING.principle.title} body={TRAINING.principle.body} />
+              </div>
+            )}
 
             <div className="mt-5 flex flex-wrap gap-3">
               <Button onClick={() => retry(false)}>Try again</Button>
@@ -332,7 +408,7 @@ export default function TrainPage() {
                 <strong>{result.bestSan}</strong> ({result.bestEval}). Both address the problem.
               </p>
             )}
-            <p className="mt-3 leading-relaxed">{TRAINING.whyBestWorks}</p>
+            {result.insight && <p className="mt-3 leading-relaxed">{result.insight}</p>}
             <div className="mt-4">
               <PrincipleBox title={TRAINING.principle.title} body={TRAINING.principle.body} />
             </div>

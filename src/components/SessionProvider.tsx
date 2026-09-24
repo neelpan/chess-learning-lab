@@ -27,6 +27,8 @@ type SessionState = {
   attempts: Attempt[];
   solved: boolean;
   usedReveal: boolean;
+  /** The tempting mistake for this position, explained by the same engine pipeline. */
+  trap: { san: string; text: string } | null;
 };
 
 type SessionApi = SessionState & {
@@ -35,11 +37,18 @@ type SessionApi = SessionState & {
   updateAttempt: (id: number, patch: Partial<Attempt>) => void;
   markSolved: () => void;
   markRevealed: () => void;
+  setTrap: (trap: { san: string; text: string }) => void;
   resetTraining: () => void;
   resetAll: () => void;
 };
 
-const EMPTY: SessionState = { concepts: [], attempts: [], solved: false, usedReveal: false };
+const EMPTY: SessionState = {
+  concepts: [],
+  attempts: [],
+  solved: false,
+  usedReveal: false,
+  trap: null,
+};
 const SessionContext = createContext<SessionApi | null>(null);
 
 // Learning state lives in memory only — no accounts, no storage.
@@ -67,9 +76,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const markSolved = useCallback(() => setState((s) => ({ ...s, solved: true })), []);
   const markRevealed = useCallback(() => setState((s) => ({ ...s, usedReveal: true })), []);
   const resetTraining = useCallback(
-    () => setState((s) => ({ ...s, attempts: [], solved: false, usedReveal: false })),
+    () => setState((s) => ({ ...s, attempts: [], solved: false, usedReveal: false, trap: null })),
     [],
   );
+  const setTrap = useCallback((trap: { san: string; text: string }) => setState((s) => ({ ...s, trap })), []);
   const resetAll = useCallback(() => setState(EMPTY), []);
 
   const api = useMemo<SessionApi>(
@@ -80,10 +90,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       updateAttempt,
       markSolved,
       markRevealed,
+      setTrap,
       resetTraining,
       resetAll,
     }),
-    [state, addConcept, addAttempt, updateAttempt, markSolved, markRevealed, resetTraining, resetAll],
+    [state, addConcept, addAttempt, updateAttempt, markSolved, markRevealed, setTrap, resetTraining, resetAll],
   );
 
   return <SessionContext.Provider value={api}>{children}</SessionContext.Provider>;

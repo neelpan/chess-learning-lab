@@ -122,7 +122,6 @@ export const TRAINING = {
     "White's pawn on d5 now attacks your knight on c6. You're Black — what's the best way to respond?",
   hint: "Count the pieces attacking f7, then the pieces defending it.",
   weakSquare: "f7",
-  theme: "the pressure on f7, where attackers outnumber defenders",
   focusSquares: ["c4", "g5", "f7"],
   /** Moves within this many centipawns of the best move count as good. */
   acceptableLoss: 40,
@@ -132,13 +131,18 @@ export const TRAINING = {
   },
   takeaway:
     "Before you grab a pawn, count the attackers on your weak squares — and hit an attacker first.",
-  /** The line shown for a correct answer, used when the learner finds the top move. */
-  whyBestWorks:
-    "Na5 attacks the bishop on c4 — one of the two pieces bearing down on f7 — so White has to spend a move on it instead of piling on. After Bb5+ c6 you return the pawn, but you're solid and out of danger.",
-  trap: {
-    move: "Nxd5",
-    label: "The Fried Liver trap",
-    body: "Recapturing on d5 looks natural, but f7 is still attacked twice and defended once. White plays Nxf7! and your king is dragged into the open.",
-  },
+  /** A known tempting-but-wrong move; its consequences are derived by the engine, not written here. */
+  temptingMove: "Nxd5",
   concepts: ["twoKnightsAttack", "tempo"] as string[],
 };
+
+/**
+ * The scenario's lesson principle is only relevant when the verified tactic actually involves the
+ * scenario's weak square. For any other mistake it must not be presented as the reason.
+ */
+export function principleAppliesTo(
+  tactic: { attacker: { square: string }; targets: { square: string }[] } | null | undefined,
+): boolean {
+  if (!tactic) return false;
+  return [tactic.attacker, ...tactic.targets].some((p) => p.square === TRAINING.weakSquare);
+}
